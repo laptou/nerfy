@@ -7,7 +7,7 @@ use candle_core::{
 };
 use candle_nn::{Activation, Linear, Optimizer, VarBuilder, VarMap};
 
-use winit::dpi::{LogicalSize, Size, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
@@ -102,25 +102,25 @@ pub fn main() -> Result<()> {
     let varmap = VarMap::new();
     let vs = VarBuilder::from_varmap(&varmap, DType::F64, &dev);
 
-    // let adamw_params = candle_nn:: {
-    //     lr: 5e-4,
-    //     ..Default::default()
-    // };
-    let mut opt = candle_nn::SGD::new(varmap.all_vars(), 5e-4)?;
+    let adamw_params = candle_nn::ParamsAdamW {
+        lr: 5e-4,
+        ..Default::default()
+    };
+    let mut opt = candle_nn::AdamW::new(varmap.all_vars(), adamw_params)?;
 
-    let model = TinyNerf::new(8, 16, vs)?;
+    let model = TinyNerf::new(8, 64, vs)?;
 
     let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, &dev)?;
 
-    for step in 0..1 {
+    for step in 0..10 {
         let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
         let loss = (rgb - &test_img)?.sqr()?.mean_all()?;
         opt.backward_step(&loss)?;
-        println!("step {step} / 4");
+        println!("step {} / 10 done", step + 1);
     }
 
     let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
-    display_img(&rgb).unwrap();
+    // display_img(&rgb).unwrap();
 
     Ok(())
 }
@@ -178,7 +178,7 @@ impl Module for TinyNerf {
                 current = Tensor::cat(&[&current, xs], D::Minus1)?;
             }
 
-            println!("layer_idx = {layer_idx} layer = {layer:?} activation = {activation:?} current shape = {:?}", current.shape());
+            // println!("layer_idx = {layer_idx} layer = {layer:?} activation = {activation:?} current shape = {:?}", current.shape());
 
             current = layer.forward(&current.contiguous()?)?;
 
@@ -324,31 +324,31 @@ fn render_rays(
     // run the network
     let (height, width, depths, _) = points.shape().dims4()?;
     let points_flat = points.reshape(((), 3))?;
-    let points_flat = embed_position(&points_flat)?;
 
     // we run the network on chunks of the input at a time b/c we can't train on
     // 640,000 samples at once (we get out-of-memory errors)
     let mut raw_parts = vec![];
     let sample_count = height * width * depths;
-    const CHUNK_SIZE: usize = 1024 * 32;
+    const CHUNK_SIZE: usize = 1024 * 64;
     for chunk_idx in 0..=(sample_count / CHUNK_SIZE) {
         let start = chunk_idx * CHUNK_SIZE;
         let end = min(start + CHUNK_SIZE, sample_count);
 
         if end > start {
-            let raw_part = network_fn.forward(&points_flat.i(start..end)?)?;
+            let chunk = points_flat.i(start..end)?;
+            let embedded_chunk = embed_position(&chunk)?;
+
+            let raw_part = network_fn.forward(&embedded_chunk)?;
             raw_parts.push(raw_part);
         }
     }
 
     let raw = Tensor::cat(&raw_parts, 0)?;
     let raw = raw.reshape((height, width, n_samples, 4))?;
-    dbg!(raw.shape());
 
     // compute opacities and colors
     let sigma_a = Activation::Relu.forward(&raw.i((.., .., .., 3))?)?;
     let rgb = Activation::Sigmoid.forward(&raw.i((.., .., .., ..3))?)?;
-    dbg!(sigma_a.shape());
 
     // do volume rendering
     let dists = (z_vals.i((.., .., 1..))? - z_vals.i((.., .., ..n_samples - 1))?)?;
@@ -359,7 +359,6 @@ fn render_rays(
         ],
         D::Minus1,
     )?;
-    dbg!(dists.shape());
 
     let alpha = sigma_a.neg()?.mul(&dists)?.exp()?;
     let alpha = (1. - alpha)?;
