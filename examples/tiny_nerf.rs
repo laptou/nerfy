@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::num::NonZeroU32;
 
 use candle_core::{
@@ -6,83 +7,86 @@ use candle_core::{
 };
 use candle_nn::{Activation, Linear, Optimizer, VarBuilder, VarMap};
 
+use winit::dpi::{LogicalSize, Size, PhysicalSize};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
-fn display_img(img_rgb: &Tensor) {
-    let img_rgb = (img_rgb * 255.).unwrap();
-    let (height, width, img_channels) = img_rgb.shape().dims3().unwrap();
+fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
+    let img_rgb = (img_rgb * 255.)?.to_dtype(DType::U8)?;
+    let (img_height, img_width, img_channels) = img_rgb.shape().dims3()?;
 
-    let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let event_loop = EventLoop::new()?;
+    let window = WindowBuilder::new()
+        .with_inner_size(LogicalSize::new(img_height as u32, img_width as u32))
+        .build(&event_loop)?;
     let context = unsafe { softbuffer::Context::new(&window) }.unwrap();
     let mut surface = unsafe { softbuffer::Surface::new(&context, &window) }.unwrap();
 
-    event_loop
-        .run(move |event, elwt| match event {
-            Event::AboutToWait => {
-                // Application update code.
+    event_loop.run(move |event, elwt| match event {
+        Event::AboutToWait => {
+            // Application update code.
 
-                // Queue a RedrawRequested event.
-                //
-                // You only need to call this if you've determined that you need to redraw, in
-                // applications which do not always need to. Applications that redraw continuously
-                // can just render here instead.
-                // window.request_redraw();
-            }
-            Event::WindowEvent {
-                event: WindowEvent::RedrawRequested,
-                window_id,
-            } if window_id == window.id() => {
-                let (width, height) = {
-                    let size = window.inner_size();
-                    (size.width, size.height)
-                };
+            // Queue a RedrawRequested event.
+            //
+            // You only need to call this if you've determined that you need to redraw, in
+            // applications which do not always need to. Applications that redraw continuously
+            // can just render here instead.
+            // window.request_redraw();
+        }
+        Event::WindowEvent {
+            event: WindowEvent::RedrawRequested,
+            window_id,
+        } if window_id == window.id() => {
+            let (window_width, window_height) = {
+                let size = window.inner_size();
+                (size.width, size.height)
+            };
 
-                surface
-                    .resize(
-                        NonZeroU32::new(width).unwrap(),
-                        NonZeroU32::new(height).unwrap(),
-                    )
-                    .unwrap();
+            surface
+                .resize(
+                    NonZeroU32::new(window_width).unwrap(),
+                    NonZeroU32::new(window_height).unwrap(),
+                )
+                .unwrap();
 
-                let mut buffer = surface.buffer_mut().unwrap();
+            let mut buffer = surface.buffer_mut().unwrap();
 
-                for row in 0..(height as usize) {
-                    for col in 0..(width as usize) {
-                        let pixel = img_rgb
-                            .i((row as usize, col as usize, ..))
-                            .unwrap()
-                            .to_vec1::<u8>()
-                            .unwrap();
+            for row in 0..(img_height as usize) {
+                for col in 0..(img_width as usize) {
+                    let pixel = img_rgb
+                        .i((row as usize, col as usize, ..))
+                        .unwrap()
+                        .to_vec1::<u8>()
+                        .unwrap();
 
-                        let [r, g, b] = pixel[..] else {
-                            panic!("pixel didn't have 3 components")
-                        };
+                    let [r, g, b] = pixel[..] else {
+                        panic!("pixel didn't have 3 components")
+                    };
 
-                        buffer[row * (width as usize) + col] =
-                            (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
-                    }
+                    buffer[row * (window_width as usize) + col] =
+                        (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
                 }
+            }
 
-                buffer.present().unwrap();
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                window_id,
-            } if window_id == window.id() => {
-                elwt.exit();
-            }
-            _ => {}
-        })
-        .unwrap();
+            buffer.present().unwrap();
+        }
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            window_id,
+        } if window_id == window.id() => {
+            elwt.exit();
+        }
+        _ => {}
+    })?;
+
+    Ok(())
 }
 pub fn main() -> Result<()> {
     set_print_options_short();
 
-    let dev = Device::cuda_if_available(0)?;
-    // let dev = Device::Cpu;
+    // let dev = Device::cuda_if_available(0)?;
+    let dev = Device::Cpu;
     let tiny_nerf_data = safetensors::load("data/tiny_nerf_data.safetensors", &dev)?;
 
     let tn_images = &tiny_nerf_data["images"];
@@ -98,24 +102,26 @@ pub fn main() -> Result<()> {
     let varmap = VarMap::new();
     let vs = VarBuilder::from_varmap(&varmap, DType::F64, &dev);
 
-    let adamw_params = candle_nn::ParamsAdamW {
-        lr: 5e-4,
-        ..Default::default()
-    };
-    let mut opt = candle_nn::AdamW::new(varmap.all_vars(), adamw_params)?;
+    // let adamw_params = candle_nn:: {
+    //     lr: 5e-4,
+    //     ..Default::default()
+    // };
+    let mut opt = candle_nn::SGD::new(varmap.all_vars(), 5e-4)?;
 
-    let model = TinyNerf::new(8, 256, vs)?;
+    let model = TinyNerf::new(8, 16, vs)?;
 
     let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, &dev)?;
 
-    for _ in 0..1000 {
+    for step in 0..1 {
         let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
         let loss = (rgb - &test_img)?.sqr()?.mean_all()?;
         opt.backward_step(&loss)?;
+        println!("step {step} / 4");
     }
 
     let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
-    display_img(&rgb);
+    display_img(&rgb).unwrap();
+
     Ok(())
 }
 
@@ -174,7 +180,7 @@ impl Module for TinyNerf {
 
             println!("layer_idx = {layer_idx} layer = {layer:?} activation = {activation:?} current shape = {:?}", current.shape());
 
-            current = layer.forward(&current)?;
+            current = layer.forward(&current.contiguous()?)?;
 
             if let Some(activation) = activation {
                 current = activation.forward(&current)?;
@@ -243,11 +249,11 @@ fn get_rays(
     let dirs = Tensor::stack(
         &[
             // x component of direction
-            ((x - (width as f64 * 0.5))? / focal_dist)?.contiguous()?,
+            ((x - (width as f64 * 0.5))? / focal_dist)?,
             // y component of direction
-            ((y - (height as f64 * 0.5))? / focal_dist)?.neg()?.contiguous()?,
+            ((y - (height as f64 * 0.5))? / focal_dist)?.neg()?,
             // z-component of direction (-1 for all rays)
-            Tensor::ones((height, width), DType::F64, dev)?.neg()?.contiguous()?,
+            Tensor::ones((height, width), DType::F64, dev)?.neg()?,
         ],
         D::Minus1,
     )?;
@@ -316,11 +322,26 @@ fn render_rays(
     ))?;
 
     // run the network
-    let (height, width, _, _) = points.shape().dims4()?;
+    let (height, width, depths, _) = points.shape().dims4()?;
     let points_flat = points.reshape(((), 3))?;
     let points_flat = embed_position(&points_flat)?;
 
-    let raw = network_fn.forward(&points_flat)?;
+    // we run the network on chunks of the input at a time b/c we can't train on
+    // 640,000 samples at once (we get out-of-memory errors)
+    let mut raw_parts = vec![];
+    let sample_count = height * width * depths;
+    const CHUNK_SIZE: usize = 1024 * 32;
+    for chunk_idx in 0..=(sample_count / CHUNK_SIZE) {
+        let start = chunk_idx * CHUNK_SIZE;
+        let end = min(start + CHUNK_SIZE, sample_count);
+
+        if end > start {
+            let raw_part = network_fn.forward(&points_flat.i(start..end)?)?;
+            raw_parts.push(raw_part);
+        }
+    }
+
+    let raw = Tensor::cat(&raw_parts, 0)?;
     let raw = raw.reshape((height, width, n_samples, 4))?;
     dbg!(raw.shape());
 
