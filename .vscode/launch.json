@@ -1,0 +1,107 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+  {
+    "name": "CUDA C++: Launch",
+    "type": "cuda-gdb",
+    "request": "launch",
+    "program": "${workspaceFolder}/target/debug/examples/tiny_nerf"
+  },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in library 'nerfy'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--lib",
+          "--package=nerfy"
+        ],
+        "filter": {
+          "name": "nerfy",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug executable 'nerfy'",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=nerfy",
+          "--package=nerfy"
+        ],
+        "filter": {
+          "name": "nerfy",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in executable 'nerfy'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--bin=nerfy",
+          "--package=nerfy"
+        ],
+        "filter": {
+          "name": "nerfy",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug example 'tiny_nerf'",
+      "cargo": {
+        "args": [
+          "build",
+          "--example=tiny_nerf",
+          "--package=nerfy"
+        ],
+        "filter": {
+          "name": "tiny_nerf",
+          "kind": "example"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in example 'tiny_nerf'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--example=tiny_nerf",
+          "--package=nerfy"
+        ],
+        "filter": {
+          "name": "tiny_nerf",
+          "kind": "example"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+    },
+  ]
+}
