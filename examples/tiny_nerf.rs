@@ -1,11 +1,12 @@
 use std::cmp::min;
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 
-use candle_core::{
-    display::set_print_options_short, safetensors, shape::Dims, DType, Device, IndexOp, Module,
-    Result, Tensor, D,
+use tch::nn::{Activation, Linear, Optimizer, VarBuilder, VarMap, VarStore};
+use tch::{
+    display::set_print_options_short, shape::Dims, DType, Device, IndexOp, Module, Result, Tensor,
+    D,
 };
-use candle_nn::{Activation, Linear, Optimizer, VarBuilder, VarMap};
 
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::event::{Event, WindowEvent};
@@ -86,15 +87,15 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
 pub fn main() -> Result<()> {
     set_print_options_short();
 
-    let dev = Device::cuda_if_available(0)?;
-    // let dev = Device::Cpu;
-    let tiny_nerf_data = safetensors::load("data/tiny_nerf_data.safetensors", &dev)?;
+    let dev = Device::cuda_if_available();
+    let mut tiny_nerf_data =
+        HashMap::from_iter(Tensor::read_safetensors("data/tiny_nerf_data.safetensors")?);
 
     let tn_images = &tiny_nerf_data["images"];
     let tn_poses = &tiny_nerf_data["poses"];
     let tn_focal = &tiny_nerf_data["focal"];
 
-    let (img_count, height, width, img_channels) = tn_images.shape().dims4()?;
+    let (img_count, height, width, img_channels) = tn_images.size4()?;
     let focal_dist = tn_focal.to_scalar()?;
 
     let test_pose = tn_poses.i(101)?.to_dtype(DType::F64)?;
@@ -129,7 +130,6 @@ pub fn main() -> Result<()> {
 struct TinyNerf {
     hidden_layers: Vec<Linear>,
     output_layer: Linear,
-    activation: Activation,
 }
 
 impl TinyNerf {
@@ -141,7 +141,12 @@ impl TinyNerf {
 
         for layer_idx in 0..depth {
             let vb = vb.pp(format!("hidden_layer_{layer_idx}"));
-            hidden_layers.push(candle_nn::linear(prev_layer_size, hidden_layer_width, vb)?);
+            hidden_layers.push(tch::nn::linear(
+                vb,
+                prev_layer_size,
+                hidden_layer_width,
+                tch::nn::LinearConfig::default(),
+            ));
 
             if layer_idx % 4 == 0 && layer_idx != 0 {
                 // every 4th layer, we concat the input
@@ -153,20 +158,19 @@ impl TinyNerf {
 
         let output_layer = {
             let vb = vb.pp(format!("output_layer"));
-            candle_nn::linear(prev_layer_size, 4, vb)?
+            tch::nn::linear(vb, prev_layer_size, 4, tch::nn::LinearConfig::default())?
         };
 
         Ok(Self {
             hidden_layers,
             output_layer,
-            activation: Activation::Relu,
         })
     }
 }
 
 impl Module for TinyNerf {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let mut current = xs.clone();
+        let mut current = xs.shallow_clone();
 
         for (layer_idx, (layer, activation)) in self
             .hidden_layers
@@ -375,7 +379,7 @@ fn cum_prod<D: Dims>(x: &Tensor, axis: D, exclusive: bool) -> Result<Tensor> {
         prev = element;
     }
 
-    Tensor::cat(&elements, dim)
+    Tensor::f_cat(&elements, dim)
 }
 
 #[test]
