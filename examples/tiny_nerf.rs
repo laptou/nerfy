@@ -7,14 +7,14 @@ use candle_core::{
 };
 use candle_nn::{Activation, Linear, Optimizer, VarBuilder, VarMap};
 
-use winit::dpi::{LogicalSize, PhysicalSize, Size};
+use winit::dpi::LogicalSize;
 use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 
 fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
     let img_rgb = (img_rgb * 255.)?.to_dtype(DType::U8)?;
-    let (img_height, img_width, img_channels) = img_rgb.shape().dims3()?;
+    let (img_height, img_width, _img_channels) = img_rgb.shape().dims3()?;
 
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
@@ -94,7 +94,7 @@ pub fn main() -> Result<()> {
     let tn_poses = &tiny_nerf_data["poses"];
     let tn_focal = &tiny_nerf_data["focal"];
 
-    let (img_count, height, width, img_channels) = tn_images.shape().dims4()?;
+    let (_img_count, height, width, _img_channels) = tn_images.shape().dims4()?;
     let focal_dist = tn_focal.to_scalar()?;
 
     let test_pose = tn_poses.i(101)?.to_dtype(DType::F32)?;
@@ -114,13 +114,13 @@ pub fn main() -> Result<()> {
     let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, &dev)?;
 
     for step in 0..10 {
-        let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
+        let (rgb, _depth, _acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
         let loss = (rgb - &test_img)?.sqr()?.mean_all()?;
         opt.backward_step(&loss)?;
         println!("step {} / 10 done", step + 1);
     }
 
-    let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
+    let (_rgb, _depth, _acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
     // display_img(&rgb).unwrap();
 
     Ok(())
