@@ -50,7 +50,7 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
 
             let mut buffer = surface.buffer_mut().unwrap();
 
-            let img_rgb: Vec<Vec<Vec<f64>>> = (&img_rgb).try_into().unwrap();
+            let img_rgb: Vec<Vec<Vec<u8>>> = (&img_rgb).try_into().unwrap();
 
             for row in 0..(img_height as usize) {
                 for col in 0..(img_width as usize) {
@@ -86,7 +86,7 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
 pub fn main() -> Result<()> {
     set_print_options_short();
 
-    let dev = Device::cuda_if_available();
+    let dev = Device::Cpu;
     println!("dev = {dev:?}");
 
     let tiny_nerf_data: HashMap<String, Tensor> =
