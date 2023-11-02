@@ -86,8 +86,8 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
 pub fn main() -> Result<()> {
     set_print_options_short();
 
-    // let dev = Device::cuda_if_available(0)?;
-    let dev = Device::Cpu;
+    let dev = Device::cuda_if_available(0)?;
+    // let dev = Device::Cpu;
     let tiny_nerf_data = safetensors::load("data/tiny_nerf_data.safetensors", &dev)?;
 
     let tn_images = &tiny_nerf_data["images"];
@@ -101,7 +101,7 @@ pub fn main() -> Result<()> {
     let test_img = tn_images.i(101)?.to_dtype(DType::F64)?;
 
     let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
+    let vs = VarBuilder::from_varmap(&varmap, DType::F64, &dev);
 
     let adamw_params = candle_nn::ParamsAdamW {
         lr: 5e-4,
@@ -209,32 +209,6 @@ fn embed_position(positions: &Tensor) -> Result<Tensor> {
     Ok(output)
 }
 
-fn meshgrid(x: &Tensor, y: &Tensor) -> Result<(Tensor, Tensor)> {
-    let width = x.shape().dims1()?;
-    let height = y.shape().dims1()?;
-
-    let x_rows: Vec<_> = std::iter::repeat(x).take(height).collect();
-    let y_cols: Vec<_> = std::iter::repeat(y).take(width).collect();
-    let xs = Tensor::stack(&x_rows, 0)?;
-    let ys = Tensor::stack(&y_cols, 0)?;
-    let xs = xs.transpose(0, 1)?;
-
-    Ok((xs, ys))
-}
-
-fn meshgrid_xy(x: &Tensor, y: &Tensor) -> Result<(Tensor, Tensor)> {
-    let width = x.shape().dims1()?;
-    let height = y.shape().dims1()?;
-
-    let x_rows: Vec<_> = std::iter::repeat(x).take(height).collect();
-    let y_cols: Vec<_> = std::iter::repeat(y).take(width).collect();
-    let xs = Tensor::stack(&x_rows, 0)?;
-    let ys = Tensor::stack(&y_cols, 0)?;
-    let ys: Tensor = ys.transpose(0, 1)?;
-
-    Ok((xs, ys))
-}
-
 fn get_rays(
     height: usize,
     width: usize,
@@ -244,7 +218,9 @@ fn get_rays(
 ) -> Result<(Tensor, Tensor)> {
     let x = Tensor::arange(0, width as i64, dev)?.to_dtype(DType::F64)?;
     let y = Tensor::arange(0, height as i64, dev)?.to_dtype(DType::F64)?;
-    let (x, y) = meshgrid_xy(&x, &y)?;
+    let mut xy = Tensor::meshgrid(&[&x, &y], true)?;
+    let y = xy.pop().unwrap();
+    let x = xy.pop().unwrap();
 
     // compute the direction of each ray based on the pixel position
     let dirs = Tensor::stack(
