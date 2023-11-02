@@ -86,7 +86,7 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
 pub fn main() -> Result<()> {
     set_print_options_short();
 
-    let dev = Device::Cpu;
+    let dev = Device::cuda_if_available();
     println!("dev = {dev:?}");
 
     let tiny_nerf_data: HashMap<String, Tensor> =
@@ -99,22 +99,23 @@ pub fn main() -> Result<()> {
     let (img_count, height, width, img_channels) = tn_images.size4()?;
     let focal_dist = tn_focal.double_value(&[]);
 
-    let test_pose = tn_poses.i(101).to_kind(Kind::Double);
-    let test_img = tn_images.i(101).to_kind(Kind::Double);
+    let test_pose = tn_poses.i(101).to_kind(Kind::Float);
+    let test_img = tn_images.i(101).to_kind(Kind::Float);
 
     let mut vs = VarStore::new(dev);
 
     let mut opt = tch::nn::AdamW::default().build(&vs, 5e-4)?;
 
     let model = TinyNerf::new(8, 256, vs.root())?;
-    vs.set_kind(Kind::Double);
+    vs.set_kind(Kind::Float);
 
     let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, dev);
 
-    for step in 0..10 {
+    for step in 0..100 {
         let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
         let loss = (rgb - &test_img).square().mean(None);
         opt.backward_step(&loss);
+        // opt.zero_grad();
         println!("step {} / 10 done", step + 1);
     }
 
@@ -225,8 +226,8 @@ fn get_rays(
     pose: &Tensor,
     dev: Device,
 ) -> (Tensor, Tensor) {
-    let x = Tensor::arange(width, (Kind::Double, dev));
-    let y = Tensor::arange(height, (Kind::Double, dev));
+    let x = Tensor::arange(width, (Kind::Float, dev));
+    let y = Tensor::arange(height, (Kind::Float, dev));
     let mut xy = Tensor::meshgrid_indexing(&[&x, &y], "xy");
     let y = xy.pop().unwrap();
     let x = xy.pop().unwrap();
@@ -239,7 +240,7 @@ fn get_rays(
             // y component of direction
             -((y - (height as f64 * 0.5)) / focal_dist),
             // z-component of direction (-1 for all rays)
-            -Tensor::ones([height, width], (Kind::Double, dev)),
+            -Tensor::ones([height, width], (Kind::Float, dev)),
         ],
         -1,
     );
@@ -248,7 +249,7 @@ fn get_rays(
 
     // get top left 3x3 for the pose matrix so we don't add translation,
     // then expand it so that the shapes match
-    let pose_local = pose.i((..3, ..3)).to_kind(Kind::Double);
+    let pose_local = pose.i((..3, ..3)).to_kind(Kind::Float);
     // translate ray directions to world coordinates
     let rays_d = dirs * pose_local;
 
@@ -274,20 +275,20 @@ fn render_rays(
     far: f64,
     n_samples: i64,
     rand: bool,
-    device: Device,
+    dev: Device,
 ) -> (Tensor, Tensor, Tensor) {
     // The batchify function is not directly translated here for simplicity. Instead,
     // consider running the network in chunks outside of this function if you have a large number of rays.
 
     // compute 3D query points
-    let mut z_vals = Tensor::linspace(near, far, n_samples, (Kind::Double, device));
+    let mut z_vals = Tensor::linspace(near, far, n_samples, (Kind::Float, dev));
     if rand {
         let mut shape = rays_o.size().clone();
         shape.pop();
         shape.push(n_samples);
 
         let rand =
-            Tensor::rand(shape, (Kind::Double, device)) * ((far - near) / (n_samples as f64));
+            Tensor::rand(shape, (Kind::Float, dev)) * ((far - near) / (n_samples as f64));
         z_vals = z_vals + rand;
     }
 
@@ -327,7 +328,7 @@ fn render_rays(
     let dists = Tensor::cat(
         &[
             &dists,
-            &Tensor::from(1e10).expand(z_vals.i((.., .., ..1)).size(), false),
+            &Tensor::from(1e10).expand(z_vals.i((.., .., ..1)).size(), false).to_device(dev),
         ],
         -1,
     );
