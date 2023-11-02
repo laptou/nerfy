@@ -3,3 +3,4 @@ perf.data*
 heaptrack.*
 data/
 libtorch/
+flamegraph.svg
