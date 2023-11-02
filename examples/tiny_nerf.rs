@@ -5,14 +5,14 @@ use std::num::NonZeroU32;
 use tch::nn::{Linear, Module, OptimizerConfig, Path, VarStore};
 use tch::{display::set_print_options_short, Device, IndexOp, Kind, Result, Tensor};
 
-use winit::dpi::{LogicalSize, PhysicalSize, Size};
+use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 
 fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
     let img_rgb = (img_rgb * 255.).to_kind(Kind::Int8);
-    let (img_height, img_width, img_channels) = img_rgb.size3()?;
+    let (img_height, img_width, _img_channels) = img_rgb.size3()?;
 
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
@@ -36,16 +36,13 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
             event: WindowEvent::RedrawRequested,
             window_id,
         } if window_id == window.id() => {
-            let (window_width, window_height) = {
+            let (window_width, _window_height) = {
                 let size = window.inner_size();
                 (size.width, size.height)
             };
 
             surface
-                .resize(
-                    NonZeroU32::new(100).unwrap(),
-                    NonZeroU32::new(100).unwrap(),
-                )
+                .resize(NonZeroU32::new(100).unwrap(), NonZeroU32::new(100).unwrap())
                 .unwrap();
 
             let mut buffer = surface.buffer_mut().unwrap();
@@ -62,7 +59,9 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
                     //     .unwrap();
 
                     let pixel = &img_rgb[row][col];
-                    let &[r, g, b] = &pixel[..] else { unreachable!()};
+                    let &[r, g, b] = &pixel[..] else {
+                        unreachable!()
+                    };
 
                     buffer[row * (window_width as usize) + col] =
                         (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
@@ -96,7 +95,7 @@ pub fn main() -> Result<()> {
     let tn_poses = tiny_nerf_data["poses"].to_device(dev);
     let tn_focal = &tiny_nerf_data["focal"];
 
-    let (img_count, height, width, img_channels) = tn_images.size4()?;
+    let (_img_count, height, width, _img_channels) = tn_images.size4()?;
     let focal_dist = tn_focal.double_value(&[]);
 
     let test_pose = tn_poses.i(101).to_kind(Kind::Float);
@@ -112,14 +111,14 @@ pub fn main() -> Result<()> {
     let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, dev);
 
     for step in 0..300 {
-        let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
+        let (rgb, _depth, _acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
         let loss = (rgb - &test_img).square().mean(None);
         opt.backward_step(&loss);
         // opt.zero_grad();
         println!("step {} / 300 done", step + 1);
     }
 
-    let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
+    let (rgb, _depth, _acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
     display_img(&rgb).unwrap();
 
     Ok(())
@@ -193,7 +192,7 @@ impl Module for TinyNerf {
 
             current = layer.forward(&current);
 
-            if let Some(activation) = activation {
+            if let Some(_activation) = activation {
                 current = current.relu();
             }
         }
@@ -209,7 +208,7 @@ fn embed_position(positions: &Tensor) -> Tensor {
     for level_idx in 0..POSITION_EMBED_LEVELS {
         // this is equivalent to 2 ** (positions * level_idx)
         // b/c we don't have a variable base exponent in candle 😭
-        let x = (positions * ((level_idx as f64) * f64::ln(2.)));
+        let x = positions * ((level_idx as f64) * f64::ln(2.));
         let x = x.exp();
         output.push(x.sin());
         output.push(x.cos());
@@ -287,8 +286,7 @@ fn render_rays(
         shape.pop();
         shape.push(n_samples);
 
-        let rand =
-            Tensor::rand(shape, (Kind::Float, dev)) * ((far - near) / (n_samples as f64));
+        let rand = Tensor::rand(shape, (Kind::Float, dev)) * ((far - near) / (n_samples as f64));
         z_vals = z_vals + rand;
     }
 
@@ -328,14 +326,16 @@ fn render_rays(
     let dists = Tensor::cat(
         &[
             &dists,
-            &Tensor::from(1e10).expand(z_vals.i((.., .., ..1)).size(), false).to_device(dev),
+            &Tensor::from(1e10)
+                .expand(z_vals.i((.., .., ..1)).size(), false)
+                .to_device(dev),
         ],
         -1,
     );
 
     let alpha = (-sigma_a * dists).exp();
-    let alpha = (1.0f64 - &alpha);
-    let alpha_e = ((1.0f64 - &alpha) + 1e-10);
+    let alpha = 1.0f64 - &alpha;
+    let alpha_e = (1.0f64 - &alpha) + 1e-10;
     let weights = alpha * alpha_e.cumprod(-1, None);
 
     let rgb_map = (weights.unsqueeze(-1) * rgb).sum_dim_intlist(-2, false, None);
