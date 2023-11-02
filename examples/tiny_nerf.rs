@@ -82,6 +82,7 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
 
     Ok(())
 }
+
 pub fn main() -> Result<()> {
     set_print_options_short();
 
@@ -100,7 +101,7 @@ pub fn main() -> Result<()> {
     let test_img = tn_images.i(101)?.to_dtype(DType::F64)?;
 
     let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, DType::F64, &dev);
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
 
     let adamw_params = candle_nn::ParamsAdamW {
         lr: 5e-4,
