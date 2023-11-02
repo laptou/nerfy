@@ -2,11 +2,8 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
-use tch::nn::{Activation, Linear, Optimizer, VarBuilder, VarMap, VarStore};
-use tch::{
-    display::set_print_options_short, shape::Dims, DType, Device, IndexOp, Module, Result, Tensor,
-    D,
-};
+use tch::nn::{Linear, Module, OptimizerConfig, Path, VarStore};
+use tch::{display::set_print_options_short, Device, IndexOp, Kind, Result, Tensor};
 
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::event::{Event, WindowEvent};
@@ -14,8 +11,8 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
 fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
-    let img_rgb = (img_rgb * 255.)?.to_dtype(DType::U8)?;
-    let (img_height, img_width, img_channels) = img_rgb.shape().dims3()?;
+    let img_rgb = (img_rgb * 255.).to_kind(Kind::Int8);
+    let (img_height, img_width, img_channels) = img_rgb.size3()?;
 
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
@@ -53,17 +50,19 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
 
             let mut buffer = surface.buffer_mut().unwrap();
 
+            let img_rgb: Vec<Vec<Vec<f64>>> = (&img_rgb).try_into().unwrap();
+
             for row in 0..(img_height as usize) {
                 for col in 0..(img_width as usize) {
-                    let pixel = img_rgb
-                        .i((row as usize, col as usize, ..))
-                        .unwrap()
-                        .to_vec1::<u8>()
-                        .unwrap();
+                    // let pixels: Vec<Vec<f64>> = img_rgb.into();
+                    // let pixel = img_rgb
+                    //     .i((row as usize, col as usize, ..))
+                    //     .unwrap()
+                    //     .to_vec1::<u8>()
+                    //     .unwrap();
 
-                    let [r, g, b] = pixel[..] else {
-                        panic!("pixel didn't have 3 components")
-                    };
+                    let pixel = &img_rgb[row][col];
+                    let &[r, g, b] = &pixel[..] else { unreachable!()};
 
                     buffer[row * (window_width as usize) + col] =
                         (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
@@ -88,63 +87,63 @@ pub fn main() -> Result<()> {
     set_print_options_short();
 
     let dev = Device::cuda_if_available();
-    let mut tiny_nerf_data =
+    println!("dev = {dev:?}");
+
+    let tiny_nerf_data: HashMap<String, Tensor> =
         HashMap::from_iter(Tensor::read_safetensors("data/tiny_nerf_data.safetensors")?);
 
-    let tn_images = &tiny_nerf_data["images"];
-    let tn_poses = &tiny_nerf_data["poses"];
+    let tn_images = tiny_nerf_data["images"].to_device(dev);
+    let tn_poses = tiny_nerf_data["poses"].to_device(dev);
     let tn_focal = &tiny_nerf_data["focal"];
 
     let (img_count, height, width, img_channels) = tn_images.size4()?;
-    let focal_dist = tn_focal.to_scalar()?;
+    let focal_dist = tn_focal.double_value(&[]);
 
-    let test_pose = tn_poses.i(101)?.to_dtype(DType::F64)?;
-    let test_img = tn_images.i(101)?.to_dtype(DType::F64)?;
+    let test_pose = tn_poses.i(101).to_kind(Kind::Double);
+    let test_img = tn_images.i(101).to_kind(Kind::Double);
 
-    let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, DType::F64, &dev);
+    let mut vs = VarStore::new(dev);
 
-    let adamw_params = candle_nn::ParamsAdamW {
-        lr: 5e-4,
-        ..Default::default()
-    };
-    let mut opt = candle_nn::AdamW::new(varmap.all_vars(), adamw_params)?;
+    let mut opt = tch::nn::AdamW::default().build(&vs, 5e-4)?;
 
-    let model = TinyNerf::new(8, 64, vs)?;
+    let model = TinyNerf::new(8, 256, vs.root())?;
+    vs.set_kind(Kind::Double);
 
-    let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, &dev)?;
+    let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, dev);
 
     for step in 0..10 {
-        let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
-        let loss = (rgb - &test_img)?.sqr()?.mean_all()?;
-        opt.backward_step(&loss)?;
+        let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
+        let loss = (rgb - &test_img).square().mean(None);
+        opt.backward_step(&loss);
         println!("step {} / 10 done", step + 1);
     }
 
-    let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
-    // display_img(&rgb).unwrap();
+    let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
+    display_img(&rgb).unwrap();
 
     Ok(())
 }
 
+#[derive(Debug)]
 struct TinyNerf {
     hidden_layers: Vec<Linear>,
     output_layer: Linear,
 }
 
 impl TinyNerf {
-    pub fn new(depth: usize, hidden_layer_width: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(depth: usize, hidden_layer_width: usize, vs: Path) -> Result<Self> {
         let input_size = 3 + 3 * POSITION_EMBED_LEVELS * 2;
 
         let mut hidden_layers = vec![];
         let mut prev_layer_size = input_size;
 
         for layer_idx in 0..depth {
-            let vb = vb.pp(format!("hidden_layer_{layer_idx}"));
+            let vs = &vs / format!("hidden_layer_{layer_idx}");
+
             hidden_layers.push(tch::nn::linear(
-                vb,
-                prev_layer_size,
-                hidden_layer_width,
+                vs,
+                prev_layer_size as i64,
+                hidden_layer_width as i64,
                 tch::nn::LinearConfig::default(),
             ));
 
@@ -156,10 +155,12 @@ impl TinyNerf {
             }
         }
 
-        let output_layer = {
-            let vb = vb.pp(format!("output_layer"));
-            tch::nn::linear(vb, prev_layer_size, 4, tch::nn::LinearConfig::default())?
-        };
+        let output_layer = tch::nn::linear(
+            &vs / "output_layer",
+            prev_layer_size as i64,
+            4,
+            tch::nn::LinearConfig::default(),
+        );
 
         Ok(Self {
             hidden_layers,
@@ -169,60 +170,64 @@ impl TinyNerf {
 }
 
 impl Module for TinyNerf {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor) -> Tensor {
         let mut current = xs.shallow_clone();
 
         for (layer_idx, (layer, activation)) in self
             .hidden_layers
             .iter()
-            .map(|hl| (hl, Some(&self.activation)))
+            .map(|hl| (hl, Some(())))
             .chain([(&self.output_layer, None)])
             .enumerate()
         {
             if layer_idx % 4 == 1 && layer_idx != 1 {
-                current = Tensor::cat(&[&current, xs], D::Minus1)?;
+                current = Tensor::cat(&[&current, xs], -1);
             }
 
-            // println!("layer_idx = {layer_idx} layer = {layer:?} activation = {activation:?} current shape = {:?}", current.shape());
+            // println!(
+            //     "layer_idx = {layer_idx} layer = {layer:?} current shape = {:?} ({:?})",
+            //     current.size(),
+            //     current.kind()
+            // );
 
-            current = layer.forward(&current.contiguous()?)?;
+            current = layer.forward(&current);
 
             if let Some(activation) = activation {
-                current = activation.forward(&current)?;
+                current = current.relu();
             }
         }
 
-        Ok(current)
+        current
     }
 }
 
 const POSITION_EMBED_LEVELS: usize = 6;
 
-fn embed_position(positions: &Tensor) -> Result<Tensor> {
-    let mut output = vec![positions.clone()];
+fn embed_position(positions: &Tensor) -> Tensor {
+    let mut output = vec![positions.shallow_clone()];
     for level_idx in 0..POSITION_EMBED_LEVELS {
         // this is equivalent to 2 ** (positions * level_idx)
         // b/c we don't have a variable base exponent in candle 😭
-        let x = (positions * ((level_idx as f64) * f64::ln(2.)))?;
-        let x = x.exp()?;
-        output.push(x.sin()?);
-        output.push(x.cos()?);
+        let x = (positions * ((level_idx as f64) * f64::ln(2.)));
+        let x = x.exp();
+        output.push(x.sin());
+        output.push(x.cos());
     }
 
-    let output = Tensor::cat(&output, D::Minus1)?;
-    Ok(output)
+    let output = Tensor::cat(&output, -1);
+    output
 }
 
 fn get_rays(
-    height: usize,
-    width: usize,
+    height: i64,
+    width: i64,
     focal_dist: f64,
     pose: &Tensor,
-    dev: &Device,
-) -> Result<(Tensor, Tensor)> {
-    let x = Tensor::arange(0, width as i64, dev)?.to_dtype(DType::F64)?;
-    let y = Tensor::arange(0, height as i64, dev)?.to_dtype(DType::F64)?;
-    let mut xy = Tensor::meshgrid(&[&x, &y], true)?;
+    dev: Device,
+) -> (Tensor, Tensor) {
+    let x = Tensor::arange(width, (Kind::Double, dev));
+    let y = Tensor::arange(height, (Kind::Double, dev));
+    let mut xy = Tensor::meshgrid_indexing(&[&x, &y], "xy");
     let y = xy.pop().unwrap();
     let x = xy.pop().unwrap();
 
@@ -230,174 +235,111 @@ fn get_rays(
     let dirs = Tensor::stack(
         &[
             // x component of direction
-            ((x - (width as f64 * 0.5))? / focal_dist)?,
+            ((x - (width as f64 * 0.5)) / focal_dist),
             // y component of direction
-            ((y - (height as f64 * 0.5))? / focal_dist)?.neg()?,
+            -((y - (height as f64 * 0.5)) / focal_dist),
             // z-component of direction (-1 for all rays)
-            Tensor::ones((height, width), DType::F64, dev)?.neg()?,
+            -Tensor::ones([height, width], (Kind::Double, dev)),
         ],
-        D::Minus1,
-    )?;
+        -1,
+    );
 
-    let dirs = dirs.unsqueeze(D::Minus2)?;
+    let dirs = dirs.unsqueeze(-2);
 
     // get top left 3x3 for the pose matrix so we don't add translation,
     // then expand it so that the shapes match
-    let pose_local = pose.i((..3, ..3))?.to_dtype(DType::F64)?;
+    let pose_local = pose.i((..3, ..3)).to_kind(Kind::Double);
     // translate ray directions to world coordinates
-    let rays_d = dirs.broadcast_mul(&pose_local)?;
+    let rays_d = dirs * pose_local;
 
-    let rays_d = rays_d.sum(D::Minus1)?;
-    let rays_d = rays_d.squeeze(D::Minus1)?;
+    let rays_d = rays_d.sum_dim_intlist(-1, false, None);
+    let rays_d = rays_d.squeeze_dim(-1);
 
     // ray origin is the same for every ray; it's the origin translated by the
     // translation vector, so we get it by just picking the translation out of
     // the matrix and then expanding it
     let rays_o = pose
-        .i((..3, 3))?
-        .expand(rays_d.shape())?
-        .to_dtype(rays_d.dtype())?;
+        .i((..3, 3))
+        .expand(rays_d.size(), false)
+        .to_kind(rays_d.kind());
 
-    Ok((rays_o, rays_d))
-}
-
-pub fn linspace(start: f64, stop: f64, steps: usize, device: &Device) -> Result<Tensor> {
-    if steps < 1 {
-        candle_core::bail!("cannot use linspace with steps {steps} <= 1")
-    }
-    let delta = (stop - start) / (steps - 1) as f64;
-    let vs = (0..steps)
-        .map(|step| start + step as f64 * delta)
-        .collect::<Vec<_>>();
-    Tensor::from_vec(vs, steps, device)
+    (rays_o, rays_d)
 }
 
 fn render_rays(
-    network_fn: &dyn candle_nn::Module,
+    network_fn: &dyn tch::nn::Module,
     rays_o: &Tensor,
     rays_d: &Tensor,
     near: f64,
     far: f64,
-    n_samples: usize,
+    n_samples: i64,
     rand: bool,
-    device: &Device,
-) -> Result<(Tensor, Tensor, Tensor)> {
+    device: Device,
+) -> (Tensor, Tensor, Tensor) {
     // The batchify function is not directly translated here for simplicity. Instead,
     // consider running the network in chunks outside of this function if you have a large number of rays.
 
     // compute 3D query points
-    let mut z_vals = linspace(near, far, n_samples, device)?;
+    let mut z_vals = Tensor::linspace(near, far, n_samples, (Kind::Double, device));
     if rand {
-        let shape = rays_o.shape().clone();
-        let mut shape = shape.into_dims();
-        *shape.last_mut().unwrap() = n_samples;
+        let mut shape = rays_o.size().clone();
+        shape.pop();
+        shape.push(n_samples);
 
-        let rand = Tensor::rand(0.0, (far - near) / (n_samples as f64), shape, device)?;
-        z_vals = (z_vals.broadcast_add(&rand))?;
+        let rand =
+            Tensor::rand(shape, (Kind::Double, device)) * ((far - near) / (n_samples as f64));
+        z_vals = z_vals + rand;
     }
 
-    let points = (rays_o.unsqueeze(D::Minus2)?.broadcast_add(
-        &rays_d
-            .unsqueeze(D::Minus2)?
-            .broadcast_mul(&z_vals.unsqueeze(D::Minus1)?)?,
-    ))?;
+    let points = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * z_vals.unsqueeze(-1);
 
     // run the network
-    let (height, width, depths, _) = points.shape().dims4()?;
-    let points_flat = points.reshape(((), 3))?;
+    let (height, width, depths, _) = points.size4().unwrap();
+    let points_flat = points.reshape([-1, 3]);
 
     // we run the network on chunks of the input at a time b/c we can't train on
     // 640,000 samples at once (we get out-of-memory errors)
     let mut raw_parts = vec![];
     let sample_count = height * width * depths;
-    const CHUNK_SIZE: usize = 1024 * 64;
+    const CHUNK_SIZE: i64 = 1024 * 64;
     for chunk_idx in 0..=(sample_count / CHUNK_SIZE) {
         let start = chunk_idx * CHUNK_SIZE;
         let end = min(start + CHUNK_SIZE, sample_count);
 
         if end > start {
-            let chunk = points_flat.i(start..end)?;
-            let embedded_chunk = embed_position(&chunk)?;
+            let chunk = points_flat.i(start..end);
+            let embedded_chunk = embed_position(&chunk);
 
-            let raw_part = network_fn.forward(&embedded_chunk)?;
+            let raw_part = network_fn.forward(&embedded_chunk);
             raw_parts.push(raw_part);
         }
     }
 
-    let raw = Tensor::cat(&raw_parts, 0)?;
-    let raw = raw.reshape((height, width, n_samples, 4))?;
+    let raw = Tensor::cat(&raw_parts, 0);
+    let raw = raw.reshape([height, width, n_samples as i64, 4]);
 
     // compute opacities and colors
-    let sigma_a = Activation::Relu.forward(&raw.i((.., .., .., 3))?)?;
-    let rgb = Activation::Sigmoid.forward(&raw.i((.., .., .., ..3))?)?;
+    let sigma_a = raw.i((.., .., .., 3)).relu();
+    let rgb = raw.i((.., .., .., ..3)).sigmoid();
 
     // do volume rendering
-    let dists = (z_vals.i((.., .., 1..))? - z_vals.i((.., .., ..n_samples - 1))?)?;
+    let dists = z_vals.i((.., .., 1..)) - z_vals.i((.., .., ..n_samples - 1));
     let dists = Tensor::cat(
         &[
             &dists,
-            &Tensor::new(1e10, device)?.expand(z_vals.i((.., .., ..1))?.shape())?,
+            &Tensor::from(1e10).expand(z_vals.i((.., .., ..1)).size(), false),
         ],
-        D::Minus1,
-    )?;
+        -1,
+    );
 
-    let alpha = sigma_a.neg()?.mul(&dists)?.exp()?;
-    let alpha = (1. - alpha)?;
-    let alpha_e = ((1. - &alpha)? + 1e-10)?;
-    let weights = alpha.broadcast_mul(&cum_prod(&alpha_e, D::Minus1, true)?)?;
+    let alpha = (-sigma_a * dists).exp();
+    let alpha = (1.0f64 - &alpha);
+    let alpha_e = ((1.0f64 - &alpha) + 1e-10);
+    let weights = alpha * alpha_e.cumprod(-1, None);
 
-    let rgb_map = weights
-        .unsqueeze(D::Minus1)?
-        .broadcast_mul(&rgb)?
-        .sum(D::Minus2)?;
-    let depth_map = weights.mul(&z_vals)?.sum(D::Minus1)?;
-    let acc_map = weights.sum(D::Minus1)?;
+    let rgb_map = (weights.unsqueeze(-1) * rgb).sum_dim_intlist(-2, false, None);
+    let depth_map = (&weights * z_vals).sum_dim_intlist(-1, false, None);
+    let acc_map = weights.sum_dim_intlist(-1, false, None);
 
-    Ok((rgb_map, depth_map, acc_map))
-}
-
-fn cum_prod<D: Dims>(x: &Tensor, axis: D, exclusive: bool) -> Result<Tensor> {
-    let mut elements = vec![];
-    let dims = axis.to_indexes(x.shape(), "cum_prod")?;
-    let dim = *dims.first().unwrap();
-    let len = x.shape().dims()[dim];
-
-    let mut prev = if exclusive {
-        x.ones_like()?.narrow(dim, 0, 1)?
-    } else {
-        x.narrow(dim, 0, 1)?
-    };
-
-    elements.push(prev.clone());
-
-    let range = if exclusive { 0..(len - 1) } else { 1..len };
-
-    for i in range {
-        let element = x.narrow(dim, i, 1)?;
-        let element = (&prev * element)?;
-        elements.push(element.clone());
-        prev = element;
-    }
-
-    Tensor::f_cat(&elements, dim)
-}
-
-#[test]
-fn cum_prod_test() -> Result<()> {
-    let dev = Device::Cpu;
-
-    let t = Tensor::new(&[2, 3, 4i64], &dev)?;
-    let c = cum_prod(&t, 0, false)?;
-    assert_eq!(c.to_vec1::<i64>()?, [2, 6, 24]);
-
-    let c = cum_prod(&t, 0, true)?;
-    assert_eq!(c.to_vec1::<i64>()?, [1, 2, 6]);
-
-    let t = Tensor::new(&[[2, 3, 4i64], [4, 5, 6i64]], &dev)?;
-    let c = cum_prod(&t, 0, false)?;
-    assert_eq!(c.to_vec2::<i64>()?, [[2, 3, 4], [8, 15, 24]]);
-    let c = cum_prod(&t, 1, false)?;
-    assert_eq!(c.to_vec2::<i64>()?, [[2, 6, 24], [4, 20, 120]]);
-
-    Ok(())
+    (rgb_map, depth_map, acc_map)
 }

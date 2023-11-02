@@ -84,7 +84,8 @@
       "args": [],
       "cwd": "${workspaceFolder}",
       "env": {
-        "RUST_BACKTRACE": "1"
+        "RUST_BACKTRACE": "1",
+        "LD_LIBRARY_PATH": "/run/media/ibiyemi/projects/personal/nerfy/libtorch/lib"
       }
     },
     {
