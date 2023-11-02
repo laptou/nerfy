@@ -97,11 +97,11 @@ pub fn main() -> Result<()> {
     let (img_count, height, width, img_channels) = tn_images.shape().dims4()?;
     let focal_dist = tn_focal.to_scalar()?;
 
-    let test_pose = tn_poses.i(101)?.to_dtype(DType::F64)?;
-    let test_img = tn_images.i(101)?.to_dtype(DType::F64)?;
+    let test_pose = tn_poses.i(101)?.to_dtype(DType::F32)?;
+    let test_img = tn_images.i(101)?.to_dtype(DType::F32)?;
 
     let varmap = VarMap::new();
-    let vs = VarBuilder::from_varmap(&varmap, DType::F64, &dev);
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
 
     let adamw_params = candle_nn::ParamsAdamW {
         lr: 5e-4,
@@ -216,8 +216,8 @@ fn get_rays(
     pose: &Tensor,
     dev: &Device,
 ) -> Result<(Tensor, Tensor)> {
-    let x = Tensor::arange(0, width as i64, dev)?.to_dtype(DType::F64)?;
-    let y = Tensor::arange(0, height as i64, dev)?.to_dtype(DType::F64)?;
+    let x = Tensor::arange(0, width as i64, dev)?.to_dtype(DType::F32)?;
+    let y = Tensor::arange(0, height as i64, dev)?.to_dtype(DType::F32)?;
     let mut xy = Tensor::meshgrid(&[&x, &y], true)?;
     let y = xy.pop().unwrap();
     let x = xy.pop().unwrap();
@@ -230,7 +230,7 @@ fn get_rays(
             // y component of direction
             ((y - (height as f64 * 0.5))? / focal_dist)?.neg()?,
             // z-component of direction (-1 for all rays)
-            Tensor::ones((height, width), DType::F64, dev)?.neg()?,
+            Tensor::ones((height, width), DType::F32, dev)?.neg()?,
         ],
         D::Minus1,
     )?;
@@ -239,7 +239,7 @@ fn get_rays(
 
     // get top left 3x3 for the pose matrix so we don't add translation,
     // then expand it so that the shapes match
-    let pose_local = pose.i((..3, ..3))?.to_dtype(DType::F64)?;
+    let pose_local = pose.i((..3, ..3))?.to_dtype(DType::F32)?;
     // translate ray directions to world coordinates
     let rays_d = dirs.broadcast_mul(&pose_local)?;
 
@@ -289,8 +289,10 @@ fn render_rays(
         *shape.last_mut().unwrap() = n_samples;
 
         let rand = Tensor::rand(0.0, (far - near) / (n_samples as f64), shape, device)?;
-        z_vals = (z_vals.broadcast_add(&rand))?;
+        z_vals = z_vals.broadcast_add(&rand)?;
     }
+
+    let z_vals = z_vals.to_dtype(DType::F32)?;
 
     let points = (rays_o.unsqueeze(D::Minus2)?.broadcast_add(
         &rays_d
@@ -332,7 +334,7 @@ fn render_rays(
     let dists = Tensor::cat(
         &[
             &dists,
-            &Tensor::new(1e10, device)?.expand(z_vals.i((.., .., ..1))?.shape())?,
+            &Tensor::new(1e10f32, device)?.expand(z_vals.i((.., .., ..1))?.shape())?,
         ],
         D::Minus1,
     )?;

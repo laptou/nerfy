@@ -2,3 +2,4 @@
 perf.data*
 heaptrack.*
 data/
+libtorch/
