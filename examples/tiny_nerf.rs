@@ -16,7 +16,7 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
 
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
-        .with_inner_size(LogicalSize::new(img_height as u32, img_width as u32))
+        .with_inner_size(PhysicalSize::new(img_height as u32, img_width as u32))
         .build(&event_loop)?;
     let context = unsafe { softbuffer::Context::new(&window) }.unwrap();
     let mut surface = unsafe { softbuffer::Surface::new(&context, &window) }.unwrap();
@@ -43,8 +43,8 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
 
             surface
                 .resize(
-                    NonZeroU32::new(window_width).unwrap(),
-                    NonZeroU32::new(window_height).unwrap(),
+                    NonZeroU32::new(100).unwrap(),
+                    NonZeroU32::new(100).unwrap(),
                 )
                 .unwrap();
 
@@ -111,12 +111,12 @@ pub fn main() -> Result<()> {
 
     let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, dev);
 
-    for step in 0..100 {
+    for step in 0..300 {
         let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
         let loss = (rgb - &test_img).square().mean(None);
         opt.backward_step(&loss);
         // opt.zero_grad();
-        println!("step {} / 10 done", step + 1);
+        println!("step {} / 300 done", step + 1);
     }
 
     let (rgb, depth, acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
