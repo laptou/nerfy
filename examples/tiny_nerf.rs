@@ -1,6 +1,5 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 
 use tch::nn::{Linear, Module, OptimizerConfig, Path, VarStore};
 use tch::{display::set_print_options_short, Device, IndexOp, Kind, Result, Tensor};
@@ -10,16 +9,24 @@ use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 
-fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
-    let img_rgb = (img_rgb * 255.).to_kind(Kind::Int8);
-    let (img_height, img_width, _img_channels) = img_rgb.size3()?;
-
+fn visualize_tiny_nerf(
+    img_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    img_width: usize,
+    img_height: usize,
+) -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
         .with_inner_size(PhysicalSize::new(img_height as u32, img_width as u32))
+        .with_window_level(winit::window::WindowLevel::AlwaysOnTop)
         .build(&event_loop)?;
     let context = unsafe { softbuffer::Context::new(&window) }.unwrap();
     let mut surface = unsafe { softbuffer::Surface::new(&context, &window) }.unwrap();
+    surface
+        .resize(
+            (img_width as u32).try_into().unwrap(),
+            (img_height as u32).try_into().unwrap(),
+        )
+        .unwrap();
 
     event_loop.run(move |event, elwt| match event {
         Event::AboutToWait => {
@@ -31,45 +38,30 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
             // applications which do not always need to. Applications that redraw continuously
             // can just render here instead.
             // window.request_redraw();
+
+            if let Ok(img_data) = img_rx.try_recv() {
+                let mut buffer = surface.buffer_mut().unwrap();
+
+                for row in 0..(img_height as usize) {
+                    for col in 0..(img_width as usize) {
+                        let offset = row * 100 + col;
+                        let &[r, g, b] = &img_data[offset * 3..offset * 3 + 3] else {
+                            unreachable!()
+                        };
+
+                        buffer[offset] = (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
+                    }
+                }
+
+                buffer.present().unwrap();
+            }
+
+            window.request_redraw();
         }
         Event::WindowEvent {
             event: WindowEvent::RedrawRequested,
             window_id,
-        } if window_id == window.id() => {
-            let (window_width, _window_height) = {
-                let size = window.inner_size();
-                (size.width, size.height)
-            };
-
-            surface
-                .resize(NonZeroU32::new(100).unwrap(), NonZeroU32::new(100).unwrap())
-                .unwrap();
-
-            let mut buffer = surface.buffer_mut().unwrap();
-
-            let img_rgb: Vec<Vec<Vec<u8>>> = (&img_rgb).try_into().unwrap();
-
-            for row in 0..(img_height as usize) {
-                for col in 0..(img_width as usize) {
-                    // let pixels: Vec<Vec<f64>> = img_rgb.into();
-                    // let pixel = img_rgb
-                    //     .i((row as usize, col as usize, ..))
-                    //     .unwrap()
-                    //     .to_vec1::<u8>()
-                    //     .unwrap();
-
-                    let pixel = &img_rgb[row][col];
-                    let &[r, g, b] = &pixel[..] else {
-                        unreachable!()
-                    };
-
-                    buffer[row * (window_width as usize) + col] =
-                        (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
-                }
-            }
-
-            buffer.present().unwrap();
-        }
+        } if window_id == window.id() => {}
         Event::WindowEvent {
             event: WindowEvent::CloseRequested,
             window_id,
@@ -82,7 +74,19 @@ fn display_img(img_rgb: &Tensor) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn main() -> Result<()> {
+pub fn main() -> anyhow::Result<()> {
+    let (vis_tx, vis_rx) = std::sync::mpsc::channel();
+
+    let join_handle = std::thread::spawn(|| train_tiny_nerf(vis_tx));
+
+    visualize_tiny_nerf(vis_rx, 100, 100)?;
+
+    join_handle.join().unwrap()?;
+
+    Ok(())
+}
+
+fn train_tiny_nerf(vis_tx: std::sync::mpsc::Sender<Vec<u8>>) -> anyhow::Result<()> {
     set_print_options_short();
 
     let dev = Device::cuda_if_available();
@@ -95,11 +99,8 @@ pub fn main() -> Result<()> {
     let tn_poses = tiny_nerf_data["poses"].to_device(dev);
     let tn_focal = &tiny_nerf_data["focal"];
 
-    let (_img_count, height, width, _img_channels) = tn_images.size4()?;
+    let (img_count, height, width, _img_channels) = tn_images.size4()?;
     let focal_dist = tn_focal.double_value(&[]);
-
-    let test_pose = tn_poses.i(101).to_kind(Kind::Float);
-    let test_img = tn_images.i(101).to_kind(Kind::Float);
 
     let mut vs = VarStore::new(dev);
 
@@ -108,18 +109,47 @@ pub fn main() -> Result<()> {
     let model = TinyNerf::new(8, 256, vs.root())?;
     vs.set_kind(Kind::Float);
 
-    let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, dev);
+    let vis_pose = tn_poses.i(101).to_kind(Kind::Float);
+    let (vis_rays_o, vis_rays_d) = get_rays(height, width, focal_dist, &vis_pose, dev);
 
-    for step in 0..300 {
-        let (rgb, _depth, _acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
-        let loss = (rgb - &test_img).square().mean(None);
-        opt.backward_step(&loss);
-        // opt.zero_grad();
-        println!("step {} / 300 done", step + 1);
+    let progress = indicatif::MultiProgress::new();
+    let test_progress = indicatif::ProgressBar::new(img_count as u64);
+    progress.add(test_progress.clone());
+    test_progress.tick();
+
+    for test_idx in 0..img_count {
+        let test_pose = tn_poses.i(test_idx).to_kind(Kind::Float);
+        let test_img = tn_images.i(test_idx).to_kind(Kind::Float);
+
+        let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, dev);
+
+        let test_step_progress = indicatif::ProgressBar::new(10);
+        progress.add(test_step_progress.clone());
+
+        for _epoch in 0..10 {
+            let (rgb, _depth, _acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
+            let loss = (rgb - &test_img).square().mean(None);
+            opt.backward_step(&loss);
+
+            test_step_progress.inc(1);
+
+            let _no_grad = tch::no_grad_guard();
+            let (vis_rgb, _depth, _acc) =
+                render_rays(&model, &vis_rays_o, &vis_rays_d, 2., 6., 64, true, dev);
+
+            let vis_rgb: Vec<u8> = (vis_rgb * 255)
+                .to_kind(Kind::Int8)
+                .reshape([-1])
+                .try_into()?;
+            vis_tx.send(vis_rgb)?;
+        }
+
+        test_step_progress.finish_and_clear();
+
+        test_progress.inc(1);
     }
 
-    let (rgb, _depth, _acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
-    display_img(&rgb).unwrap();
+    vs.save("tiny_nerf_trained.safetensors")?;
 
     Ok(())
 }
@@ -276,9 +306,6 @@ fn render_rays(
     rand: bool,
     dev: Device,
 ) -> (Tensor, Tensor, Tensor) {
-    // The batchify function is not directly translated here for simplicity. Instead,
-    // consider running the network in chunks outside of this function if you have a large number of rays.
-
     // compute 3D query points
     let mut z_vals = Tensor::linspace(near, far, n_samples, (Kind::Float, dev));
     if rand {
