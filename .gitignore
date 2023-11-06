@@ -4,3 +4,4 @@ heaptrack.*
 data/
 flamegraph.svg
 libtorch/
+*.safetensors

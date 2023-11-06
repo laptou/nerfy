@@ -39,21 +39,25 @@ fn visualize_tiny_nerf(
             // can just render here instead.
             // window.request_redraw();
 
-            if let Ok(img_data) = img_rx.try_recv() {
-                let mut buffer = surface.buffer_mut().unwrap();
+            match img_rx.try_recv() {
+                Ok(img_data) => {
+                    let mut buffer = surface.buffer_mut().unwrap();
 
-                for row in 0..(img_height as usize) {
-                    for col in 0..(img_width as usize) {
-                        let offset = row * 100 + col;
-                        let &[r, g, b] = &img_data[offset * 3..offset * 3 + 3] else {
-                            unreachable!()
-                        };
+                    for row in 0..(img_height as usize) {
+                        for col in 0..(img_width as usize) {
+                            let offset = row * 100 + col;
+                            let &[r, g, b] = &img_data[offset * 3..offset * 3 + 3] else {
+                                unreachable!()
+                            };
 
-                        buffer[offset] = (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
+                            buffer[offset] = (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
+                        }
                     }
-                }
 
-                buffer.present().unwrap();
+                    buffer.present().unwrap();
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => elwt.exit(),
+                _ => (),
             }
 
             window.request_redraw();
@@ -89,7 +93,7 @@ pub fn main() -> anyhow::Result<()> {
 fn train_tiny_nerf(vis_tx: std::sync::mpsc::Sender<Vec<u8>>) -> anyhow::Result<()> {
     set_print_options_short();
 
-    let dev = Device::cuda_if_available();
+    let dev = Device::Cpu;
     println!("dev = {dev:?}");
 
     let tiny_nerf_data: HashMap<String, Tensor> =
@@ -111,22 +115,25 @@ fn train_tiny_nerf(vis_tx: std::sync::mpsc::Sender<Vec<u8>>) -> anyhow::Result<(
 
     let vis_pose = tn_poses.i(101).to_kind(Kind::Float);
     let (vis_rays_o, vis_rays_d) = get_rays(height, width, focal_dist, &vis_pose, dev);
-
+    
+    let img_count = 1;
     let progress = indicatif::MultiProgress::new();
     let test_progress = indicatif::ProgressBar::new(img_count as u64);
     progress.add(test_progress.clone());
     test_progress.tick();
 
+
     for test_idx in 0..img_count {
+        let test_idx = 101;
         let test_pose = tn_poses.i(test_idx).to_kind(Kind::Float);
         let test_img = tn_images.i(test_idx).to_kind(Kind::Float);
 
         let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, dev);
 
-        let test_step_progress = indicatif::ProgressBar::new(10);
+        let test_step_progress = indicatif::ProgressBar::new(300);
         progress.add(test_step_progress.clone());
 
-        for _epoch in 0..10 {
+        for _epoch in 0..300 {
             let (rgb, _depth, _acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, dev);
             let loss = (rgb - &test_img).square().mean(None);
             opt.backward_step(&loss);
