@@ -8,7 +8,7 @@ use candle_core::{
 };
 use candle_nn::{Activation, Linear, Optimizer, VarBuilder, VarMap};
 
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
@@ -43,21 +43,25 @@ fn visualize_tiny_nerf(
             // can just render here instead.
             // window.request_redraw();
 
-            if let Ok(img_data) = img_rx.try_recv() {
-                let mut buffer = surface.buffer_mut().unwrap();
+            match img_rx.try_recv() {
+                Ok(img_data) => {
+                    let mut buffer = surface.buffer_mut().unwrap();
 
-                for row in 0..(img_height as usize) {
-                    for col in 0..(img_width as usize) {
-                        let offset = row * 100 + col;
-                        let &[r, g, b] = &img_data[offset * 3..offset * 3 + 3] else {
-                            unreachable!()
-                        };
+                    for row in 0..(img_height as usize) {
+                        for col in 0..(img_width as usize) {
+                            let offset = row * 100 + col;
+                            let &[r, g, b] = &img_data[offset * 3..offset * 3 + 3] else {
+                                unreachable!()
+                            };
 
-                        buffer[offset] = (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
+                            buffer[offset] = (b as u32) | ((g as u32) << 8) | ((r as u32) << 16);
+                        }
                     }
-                }
 
-                buffer.present().unwrap();
+                    buffer.present().unwrap();
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => elwt.exit(),
+                _ => (),
             }
 
             window.request_redraw();
@@ -83,7 +87,7 @@ pub fn main() -> anyhow::Result<()> {
 
     let join_handle = std::thread::spawn(|| train_tiny_nerf(vis_tx));
 
-    visualize_tiny_nerf(vis_rx, 100, 100)?;
+    // visualize_tiny_nerf(vis_rx, 100, 100)?;
 
     join_handle.join().unwrap()?;
 
@@ -95,17 +99,19 @@ fn train_tiny_nerf(vis_tx: std::sync::mpsc::Sender<Vec<u8>>) -> anyhow::Result<(
 
     let dev = Device::cuda_if_available(0)?;
     // let dev = Device::Cpu;
+    println!("device = {dev:?}");
     let tiny_nerf_data = safetensors::load("data/tiny_nerf_data.safetensors", &dev)?;
 
     let tn_images = &tiny_nerf_data["images"];
     let tn_poses = &tiny_nerf_data["poses"];
     let tn_focal = &tiny_nerf_data["focal"];
 
-    let (img_count, height, width, _img_channels) = tn_images.size4()?;
-    let focal_dist = tn_focal.double_value(&[]);
-
-    let mut vs = VarStore::new(dev);
-
+    let (img_count, height, width, _img_channels) = tn_images.dims4()?;
+    let focal_dist = tn_focal.to_scalar()?;
+   
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
+    
     let adamw_params = candle_nn::ParamsAdamW {
         lr: 5e-4,
         ..Default::default()
@@ -114,37 +120,45 @@ fn train_tiny_nerf(vis_tx: std::sync::mpsc::Sender<Vec<u8>>) -> anyhow::Result<(
 
     let model = TinyNerf::new(8, 64, vs)?;
 
-    let vis_pose = tn_poses.i(101).to_kind(Kind::Float);
-    let (vis_rays_o, vis_rays_d) = get_rays(height, width, focal_dist, &vis_pose, &dev);
+    let vis_pose = tn_poses.i(101)?.to_dtype(DType::F32)?;
+    let (vis_rays_o, vis_rays_d) = get_rays(height, width, focal_dist, &vis_pose, &dev)?;
+    // don't do backprop tracing on vis pose
+    let vis_rays_d = vis_rays_d.detach()?;
+    let vis_rays_o = vis_rays_o.detach()?;
 
     let progress = indicatif::MultiProgress::new();
     let test_progress = indicatif::ProgressBar::new(img_count as u64);
     progress.add(test_progress.clone());
     test_progress.tick();
 
+    let img_count = 1;
+
     for test_idx in 0..img_count {
-        let test_pose = tn_poses.i(test_idx).to_kind(Kind::Float);
-        let test_img = tn_images.i(test_idx).to_kind(Kind::Float);
+        let test_idx = 101;
+        let test_pose = tn_poses.i(test_idx)?.to_dtype(DType::F32)?;
+        let test_img = tn_images.i(test_idx)?.to_dtype(DType::F32)?;
 
-        let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, &dev);
+        let (rays_o, rays_d) = get_rays(height, width, focal_dist, &test_pose, &dev)?;
 
-        let test_step_progress = indicatif::ProgressBar::new(10);
+        let test_step_progress = indicatif::ProgressBar::new(300);
         progress.add(test_step_progress.clone());
 
-        for _epoch in 0..10 {
+
+        for _epoch in 0..300 {
             let (rgb, _depth, _acc) = render_rays(&model, &rays_o, &rays_d, 2., 6., 64, true, &dev)?;
             let loss = (rgb - &test_img)?.sqr()?.mean_all()?;
             opt.backward_step(&loss)?;
 
             test_step_progress.inc(1);
 
-            let _no_grad = tch::no_grad_guard();
+            
+            // let _no_grad = tch::no_grad_guard();
             let (vis_rgb, _depth, _acc) =
-                render_rays(&model, &vis_rays_o, &vis_rays_d, 2., 6., 64, true, &dev);
+                render_rays(&model, &vis_rays_o, &vis_rays_d, 2., 6., 64, true, &dev)?;
 
-            let vis_rgb: Vec<u8> = (vis_rgb * 255)
-                .to_kind(Kind::Int8)
-                .reshape([-1])
+            let vis_rgb: Vec<u8> = (vis_rgb * 255.)?
+                .to_dtype(DType::U8)?
+                .reshape(((),))?
                 .try_into()?;
             vis_tx.send(vis_rgb)?;
         }
@@ -154,7 +168,7 @@ fn train_tiny_nerf(vis_tx: std::sync::mpsc::Sender<Vec<u8>>) -> anyhow::Result<(
         test_progress.inc(1);
     }
 
-    vs.save("tiny_nerf_trained.safetensors")?;
+    // vs.("tiny_nerf_trained.safetensors")?;
 
     Ok(())
 }
@@ -348,6 +362,7 @@ fn render_rays(
             let embedded_chunk = embed_position(&chunk)?;
 
             let raw_part = network_fn.forward(&embedded_chunk)?;
+            dbg!(&raw_part);
             raw_parts.push(raw_part);
         }
     }

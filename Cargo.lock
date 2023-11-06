@@ -231,7 +231,7 @@ dependencies = [
 [[package]]
 name = "candle-core"
 version = "0.3.0"
-source = "git+https://github.com/laptou/candle.git#b83a58b2c220353aec94dee90914763e9d7369d4"
+source = "git+https://github.com/laptou/candle.git#b6fa53e41fd88676985cf34468428761eb12b6bf"
 dependencies = [
  "byteorder",
  "candle-kernels",
@@ -253,7 +253,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.3.0"
-source = "git+https://github.com/laptou/candle.git#b83a58b2c220353aec94dee90914763e9d7369d4"
+source = "git+https://github.com/laptou/candle.git#b6fa53e41fd88676985cf34468428761eb12b6bf"
 dependencies = [
  "anyhow",
  "glob",
@@ -263,7 +263,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.3.0"
-source = "git+https://github.com/laptou/candle.git#b83a58b2c220353aec94dee90914763e9d7369d4"
+source = "git+https://github.com/laptou/candle.git#b6fa53e41fd88676985cf34468428761eb12b6bf"
 dependencies = [
  "candle-core",
  "half",
